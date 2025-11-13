@@ -7,15 +7,28 @@ import torch
 from transformer import VoltronTransformerPretrained, TokenizeMask
 import javalang
 
-DEFECTS4J_CMD = "/home/defects4j/framework/bin/defects4j"
+DEFECTS4J_CMD = "path/to/defects4j/cloned/directory"
 DEFECTS4J_PROJECTS = {
     'Chart': 26,
     'Lang': 65,
     'Math': 106,
     'Time': 27,
     'Mockito': 38,
-    'Closure': 133,
+    'Closure': 176,
+    'Cli': 40,
+    'Codec': 18, 
+    'Collections': 28,
+    'Compress': 47,
+    'Csv': 16,
+    'Gson': 18,
+    'JacksonCore': 26,
+    'JacksonDatabind': 112,
+    'JacksonXml': 6,
+    'Jsoup': 93,
+    'JxPath': 22,
 }
+
+# < static info extracting logic >
 
 def get_complexity(node):
     complexity = 1
@@ -46,10 +59,8 @@ def analyze_file_ast(file_path):
         if node.body:
             end_line = max(stmt.position.line for stmt in node.body if stmt.position) if node.body else start_line
 
-        # complexity
         complexity = get_complexity(node)
 
-        # call tree
         called_methods = set()
         for _, call_node in node.filter(javalang.tree.MethodInvocation):
             if call_node.qualifier is None or call_node.qualifier == 'this':
@@ -96,7 +107,6 @@ def buglines_prediction(demo_type, pretrain_type, code_file_path, output_filepat
     
     tokenize_mask = TokenizeMask(pretrain_type)
 
-    # preparing static features
     try:
         methods_info, line_to_method_map = analyze_file_ast(code_file_path)
     except Exception as e:
@@ -106,7 +116,7 @@ def buglines_prediction(demo_type, pretrain_type, code_file_path, output_filepat
     with open(code_file_path, encoding='utf-8', errors='ignore') as f:
         original_lines = f.readlines()
     
-    filtered_code_map = {}
+    filtered_code_map = {} # {filtered line idx : original line idx}
     filtered_code_lines = []
     for i, code_line in enumerate(original_lines):
         stripped_line = code_line.strip()
@@ -114,7 +124,7 @@ def buglines_prediction(demo_type, pretrain_type, code_file_path, output_filepat
             filtered_code_map[len(filtered_code_lines)] = i + 1
             filtered_code_lines.append(code_line)
 
-    #sliding window logic
+    # < sliding window logic >
     window_size = 128
     stride = 64
     all_predictions = []
@@ -164,17 +174,19 @@ def buglines_prediction(demo_type, pretrain_type, code_file_path, output_filepat
                         "score": round(score * 100, 2)
                     })
 
+    # duplicate removal
     final_scores = {}
     for pred in all_predictions:
         line = pred['line']
         score = pred['score']
-        if line not in final_scores or score > final_scores[line]:
+        if line not in final_scores:
             final_scores[line] = score
+        elif line in final_scores:
+            final_scores[line] += score # cumulative sum
 
     result_dict = [{"line": l, "score": s} for l, s in final_scores.items()]
     result_dict = sorted(result_dict, key=lambda d: d['score'], reverse=True)
 
-    # filtering 'import' syntax 
     final_results_to_save = []
     for res in result_dict:
         original_line_content = original_lines[res['line'] - 1].strip()
@@ -186,7 +198,7 @@ def buglines_prediction(demo_type, pretrain_type, code_file_path, output_filepat
             original_line_content = original_lines[res['line'] - 1].strip()
             output_line = f"line-{res['line']} sus-{res['score']}%: {original_line_content}\n"
             f.write(output_line)
-    
+
     return final_results_to_save
 
 def get_buggy_files(work_dir):
@@ -208,14 +220,12 @@ def get_buggy_files(work_dir):
 def main(model_size):
     dataset_type = 'defects4j'
     results = []
-    output_dir = "results_ast_info"
+    output_dir = ""
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"-- Starting benchmark for model size: {model_size}")
     for project, num_bugs in DEFECTS4J_PROJECTS.items():
         for bug_id in range(1, num_bugs + 1):
             work_dir = f"/tmp/{project}-{bug_id}b"
-            print(f"--- Processing: {project}-{bug_id} ---")
             try:
                 checkout_cmd = f"{DEFECTS4J_CMD} checkout -p {project} -v {bug_id}b -w {work_dir}"
                 subprocess.run(checkout_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -227,7 +237,7 @@ def main(model_size):
                     if not os.path.exists(file_path):
                         print(f"[Warning] File path does not exist: {file_path}. Skipping.")
                         continue
-                    print(f"     -> Analyzing file: {file_path}")
+
                     detail_output_path = os.path.join(output_dir, f"{project}-{bug_id}_{os.path.basename(file_path)}.txt")
                     
                     detailed_predictions = buglines_prediction(dataset_type, model_size, file_path, detail_output_path)
@@ -248,7 +258,6 @@ def main(model_size):
                 subprocess.run(f"rm -rf {work_dir}", shell=True, check=False)
     output_filename = f"defects4j_results_{model_size}.csv"
     pd.DataFrame(results).to_csv(output_filename, index=False)
-    print(f"\n!! All tasks finished. Results saved to {output_filename}")
 
 if __name__ == '__main__':
     if "JAVA_HOME" not in os.environ:
